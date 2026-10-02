@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The mnemopi embeddings worker (`__omp_worker_mnemopi_embed`, ~700 MB resident with the default `bge-base` model) is now reaped after two minutes without a request and respawned on demand, instead of staying resident for the lifetime of every open session.
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes

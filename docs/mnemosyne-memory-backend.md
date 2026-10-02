@@ -179,6 +179,7 @@ new Mnemopi({
 - `/memory stats` and `/memory diagnose` render backend-specific bank statistics/diagnostics when the Mnemopi backend is active.
 - Subagents do not own separate Mnemopi retain loops; they alias the parent state when a parent Mnemopi state exists, and otherwise remain inert.
 - Backend startup is best-effort. If database/model initialization fails, the session continues with Mnemopi inert and logs a warning; memory tools then report that the backend is not initialized.
+- Local embeddings run in a per-session `__omp_worker_mnemopi_embed` subprocess (the fastembed/onnxruntime stack never loads in the agent process). The worker is spawned on the first recall or retention that needs it and reaped after two minutes with no request in flight; the next request spawns a fresh one and reloads the model, so a long pause between turns costs one cold start (a few seconds) instead of keeping ~700 MB of model memory resident per open session. `mnemopi.embeddingApiUrl` avoids the local worker entirely.
 
 ## Shutdown and durability
 

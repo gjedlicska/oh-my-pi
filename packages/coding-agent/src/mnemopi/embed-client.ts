@@ -121,6 +121,19 @@ export interface MnemopiSubprocessEmbeddingModel {
  */
 const EMBED_REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * Idle window after the last request settles before the worker is reaped.
+ * A resident `bge-base` worker holds ~700 MB of private memory and ~50
+ * threads, and a session only embeds at turn boundaries (recall on the
+ * prompt, retention after the reply), so an idle worker per open session is
+ * the dominant memory cost of the mnemopi backend. Two minutes keeps the
+ * worker warm across a normal prompt → reply → prompt cadence; a longer pause
+ * pays one cold start (spawn + model load, a few seconds) on the next
+ * request, which {@link MnemopiEmbedClient.#ensureWorker} and the self-init
+ * embed contract already handle (see `embed-protocol.ts`).
+ */
+const EMBED_IDLE_TIMEOUT_MS = 120_000;
+
 /** Race marker for {@link MnemopiEmbedClient.#awaitRequest}. */
 const REQUEST_TIMED_OUT = Symbol("mnemopi.embed.timedOut");
 
@@ -131,15 +144,19 @@ export class MnemopiEmbedClient {
 	#pending = new Map<string, PendingRequest>();
 	#nextRequestId = 0;
 	#refed = false;
+	#idleTimer: NodeJS.Timeout | undefined;
 	#spawnWorker: () => MnemopiEmbedWorkerHandle;
 	#requestTimeoutMs: number;
+	#idleTimeoutMs: number;
 
 	constructor(
 		spawnWorker: () => MnemopiEmbedWorkerHandle = spawnMnemopiEmbedWorker,
 		requestTimeoutMs: number = EMBED_REQUEST_TIMEOUT_MS,
+		idleTimeoutMs: number = EMBED_IDLE_TIMEOUT_MS,
 	) {
 		this.#spawnWorker = spawnWorker;
 		this.#requestTimeoutMs = requestTimeoutMs;
+		this.#idleTimeoutMs = idleTimeoutMs;
 	}
 
 	/**
@@ -177,6 +194,7 @@ export class MnemopiEmbedClient {
 	}
 
 	async terminate(): Promise<void> {
+		this.#disarmIdle();
 		const worker = this.#worker;
 		this.#worker = null;
 		this.#unsubscribeMessage?.();
@@ -285,7 +303,9 @@ export class MnemopiEmbedClient {
 	 * The embeddings subprocess is spawned unref'd so an idle interactive or
 	 * daemon session never blocks exit. Keep it referenced only while a request
 	 * is pending so short-lived print-mode commands cannot exit before recall
-	 * receives the worker response (issue #12067).
+	 * receives the worker response (issue #12067). The same transition drives
+	 * the idle reap: the window is armed when the last request settles and
+	 * disarmed by the next one.
 	 */
 	#syncWorkerRef(): void {
 		const worker = this.#worker;
@@ -293,8 +313,36 @@ export class MnemopiEmbedClient {
 		const shouldRef = this.#pending.size > 0;
 		if (shouldRef === this.#refed) return;
 		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
+		if (shouldRef) {
+			worker.ref();
+			this.#disarmIdle();
+		} else {
+			worker.unref();
+			this.#armIdle(worker);
+		}
+	}
+
+	/**
+	 * Reap `worker` once {@link EMBED_IDLE_TIMEOUT_MS} passes with nothing in
+	 * flight. The timer is `unref`'d so it never outlives the session's own
+	 * reasons to stay up; `terminate` disposes it, and the next request
+	 * respawns through {@link #ensureWorker}.
+	 */
+	#armIdle(worker: MnemopiEmbedWorkerHandle): void {
+		this.#disarmIdle();
+		this.#idleTimer = setTimeout(() => {
+			this.#idleTimer = undefined;
+			if (this.#worker !== worker || this.#pending.size > 0) return;
+			logger.debug("mnemopi-embed: worker idle; reaping", { idleMs: this.#idleTimeoutMs });
+			void this.terminate();
+		}, this.#idleTimeoutMs);
+		this.#idleTimer.unref();
+	}
+
+	#disarmIdle(): void {
+		if (this.#idleTimer === undefined) return;
+		clearTimeout(this.#idleTimer);
+		this.#idleTimer = undefined;
 	}
 
 	#handleMessage(message: MnemopiEmbedWorkerOutbound): void {
