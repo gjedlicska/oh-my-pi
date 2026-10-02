@@ -20,6 +20,18 @@ interface LoadedModel {
 	};
 }
 
+/**
+ * Texts per onnxruntime run when the caller does not pin a batch size.
+ * fastembed defaults to 256 and pads every text to the tokenizer's fixed
+ * 512-token `maxLength`, so one run over a retention batch allocates
+ * attention buffers for `batch × 512²` and the ORT arena never gives them
+ * back. Measured on linux-x64 with `bge-base` over 32 max-length texts:
+ * batch 32 → 1.6 GB RSS in 24 s, batch 4 → 1.1 GB in 9.8 s, batch 1 →
+ * 1.0 GB in 10 s. Throughput is flat below 8; 4 keeps the arena near its
+ * floor without serialising every text.
+ */
+const EMBED_BATCH_SIZE = 4;
+
 let loaded: Promise<LoadedModel> | null = null;
 let loadedKey = "";
 
@@ -67,7 +79,7 @@ async function handleEmbed(
 		// holds the cached `LocalEmbeddingModel` wrapper from before.
 		const { instance } = await ensureLoaded(message.model, message.cacheDir);
 		const vectors: number[][] = [];
-		const batches = instance.embed([...message.texts], message.batchSize);
+		const batches = instance.embed([...message.texts], message.batchSize ?? EMBED_BATCH_SIZE);
 		for await (const batch of batches) {
 			for (const row of batch) vectors.push(row);
 		}

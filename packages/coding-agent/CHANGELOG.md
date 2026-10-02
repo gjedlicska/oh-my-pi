@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The mnemopi embeddings worker now runs onnxruntime over 4 texts at a time instead of fastembed's 256, capping the per-worker arena (`bge-base`, 32 max-length texts: 1.6 GB → 1.1 GB RSS) and finishing retention batches about 2.4× sooner.
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes
